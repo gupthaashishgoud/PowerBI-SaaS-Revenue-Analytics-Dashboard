@@ -1,0 +1,253 @@
+// ============================================================
+// SaaS Revenue Analytics - DAX Measures
+// ============================================================
+
+// --- CORE REVENUE METRICS ---
+
+// Monthly Recurring Revenue (MRR)
+MRR = 
+CALCULATE(
+    SUM(fact_subscriptions[mrr]),
+    fact_subscriptions[status] = "active",
+    fact_subscriptions[start_date] <= MAX(dim_date[date]),
+    OR(
+        fact_subscriptions[end_date] >= MAX(dim_date[date]),
+        ISBLANK(fact_subscriptions[end_date])
+    )
+)
+
+// Annual Recurring Revenue (ARR)
+ARR = [MRR] * 12
+
+// Previous Month MRR
+MRR Previous Month = 
+CALCULATE(
+    [MRR],
+    DATEADD(dim_date[date], -1, MONTH)
+)
+
+// MRR Growth (Absolute)
+MRR Growth = [MRR] - [MRR Previous Month]
+
+// MRR Growth Rate (%)
+MRR Growth Rate = 
+DIVIDE([MRR Growth], [MRR Previous Month], 0)
+
+// --- CHURN METRICS ---
+
+// Logo Churn Rate (Customer Churn)
+Logo Churn Rate = 
+VAR CurrentCustomers = 
+    CALCULATE(
+        DISTINCTCOUNT(fact_subscriptions[customer_id]),
+        fact_subscriptions[status] = "active",
+        fact_subscriptions[start_date] <= MAX(dim_date[date]),
+        OR(fact_subscriptions[end_date] >= MAX(dim_date[date]), ISBLANK(fact_subscriptions[end_date]))
+    )
+VAR PreviousCustomers = 
+    CALCULATE(
+        DISTINCTCOUNT(fact_subscriptions[customer_id]),
+        fact_subscriptions[status] = "active",
+        fact_subscriptions[start_date] <= EOMONTH(MAX(dim_date[date]), -1),
+        OR(fact_subscriptions[end_date] >= EOMONTH(MAX(dim_date[date]), -1), ISBLANK(fact_subscriptions[end_date]))
+    )
+VAR ChurnedCustomers = PreviousCustomers - CurrentCustomers
+RETURN DIVIDE(ChurnedCustomers, PreviousCustomers, 0)
+
+// Revenue Churn Rate
+Revenue Churn Rate = 
+VAR CurrentMRR = [MRR]
+VAR PreviousMRR = [MRR Previous Month]
+VAR LostMRR = PreviousMRR - CurrentMRR
+RETURN DIVIDE(LostMRR, PreviousMRR, 0)
+
+// Net Revenue Retention (NRR)
+Net Revenue Retention = 
+VAR CurrentMRR = [MRR]
+VAR MRR_12_Months_Ago = 
+    CALCULATE(
+        [MRR],
+        DATEADD(dim_date[date], -12, MONTH)
+    )
+RETURN DIVIDE(CurrentMRR, MRR_12_Months_Ago, 0)
+
+// Gross Revenue Retention (GRR)
+Gross Revenue Retention = 
+VAR CurrentMRR = [MRR]
+VAR PreviousMRR = [MRR Previous Month]
+VAR ExpansionMRR = 
+    CALCULATE(
+        SUM(fact_subscriptions[mrr]),
+        fact_subscriptions[mrr_change_type] = "expansion",
+        fact_subscriptions[change_date] <= MAX(dim_date[date])
+    )
+VAR ChurnedAndContraction = PreviousMRR - CurrentMRR + ExpansionMRR
+RETURN DIVIDE(PreviousMRR - ChurnedAndContraction, PreviousMRR, 0)
+
+// --- CUSTOMER ACQUISITION ---
+
+// Customer Acquisition Cost (CAC)
+CAC = 
+VAR TotalSalesMarketingSpend = 
+    CALCULATE(
+        SUM(fact_expenses[amount]),
+        fact_expenses[category] IN {"Sales", "Marketing", "Advertising"}
+    )
+VAR NewCustomers = 
+    CALCULATE(
+        DISTINCTCOUNT(fact_subscriptions[customer_id]),
+        fact_subscriptions[start_date] >= STARTOFMONTH(dim_date[date]),
+        fact_subscriptions[start_date] <= EOMONTH(dim_date[date], 0)
+    )
+RETURN DIVIDE(TotalSalesMarketingSpend, NewCustomers, 0)
+
+// New Customers (This Month)
+New Customers = 
+CALCULATE(
+    DISTINCTCOUNT(fact_subscriptions[customer_id]),
+    fact_subscriptions[start_date] >= STARTOFMONTH(dim_date[date]),
+    fact_subscriptions[start_date] <= EOMONTH(dim_date[date], 0)
+)
+
+// --- LIFETIME VALUE ---
+
+// Average Revenue Per User (ARPU)
+ARPU = 
+DIVIDE(
+    [MRR],
+    CALCULATE(
+        DISTINCTCOUNT(fact_subscriptions[customer_id]),
+        fact_subscriptions[status] = "active",
+        fact_subscriptions[start_date] <= MAX(dim_date[date]),
+        OR(fact_subscriptions[end_date] >= MAX(dim_date[date]), ISBLANK(fact_subscriptions[end_date]))
+    ),
+    0
+)
+
+// Lifetime Value (LTV)
+LTV = 
+DIVIDE([ARPU], [Revenue Churn Rate], 0)
+
+// LTV:CAC Ratio
+LTV:CAC = DIVIDE([LTV], [CAC], 0)
+
+// CAC Payback Period (Months)
+CAC Payback Period = 
+DIVIDE([CAC], [ARPU], 0)
+
+// --- COHORT RETENTION ---
+
+// Cohort Month (Calculated Column on fact_subscriptions)
+// Cohort Month = EOMONTH(fact_subscriptions[start_date], 0)
+
+// Cohort Index (Months Since Signup)
+Cohort Index = 
+DATEDIFF(
+    CALCULATE(
+        MIN(fact_subscriptions[start_date]),
+        FILTER(
+            ALL(fact_subscriptions),
+            fact_subscriptions[customer_id] = EARLIER(fact_subscriptions[customer_id])
+        )
+    ),
+    MAX(dim_date[date]),
+    MONTH
+)
+
+// Cohort Retention Rate
+Cohort Retention Rate = 
+VAR CohortSize = 
+    CALCULATE(
+        DISTINCTCOUNT(fact_subscriptions[customer_id]),
+        FILTER(
+            ALL(fact_subscriptions),
+            EOMONTH(fact_subscriptions[start_date], 0) = SELECTEDVALUE(fact_subscriptions[cohort_month])
+        )
+    )
+VAR ActiveInPeriod = 
+    CALCULATE(
+        DISTINCTCOUNT(fact_subscriptions[customer_id]),
+        fact_subscriptions[status] = "active",
+        fact_subscriptions[start_date] <= MAX(dim_date[date]),
+        OR(fact_subscriptions[end_date] >= MAX(dim_date[date]), ISBLANK(fact_subscriptions[end_date]))
+    )
+RETURN DIVIDE(ActiveInPeriod, CohortSize, 0)
+
+// --- BURN RATE ---
+
+// Monthly Burn Rate
+Monthly Burn Rate = 
+VAR TotalExpenses = 
+    CALCULATE(
+        SUM(fact_expenses[amount]),
+        fact_expenses[expense_date] >= STARTOFMONTH(dim_date[date]),
+        fact_expenses[expense_date] <= EOMONTH(dim_date[date], 0)
+    )
+VAR TotalRevenue = 
+    CALCULATE(
+        SUM(fact_invoices[amount]),
+        fact_invoices[paid_date] >= STARTOFMONTH(dim_date[date]),
+        fact_invoices[paid_date] <= EOMONTH(dim_date[date], 0),
+        fact_invoices[status] = "paid"
+    )
+RETURN TotalExpenses - TotalRevenue
+
+// Runway (Months)
+Runway = 
+DIVIDE(
+    CALCULATE(SUM(fact_finance[cash_balance]), fact_finance[date] = MAX(dim_date[date])),
+    [Monthly Burn Rate],
+    0
+)
+
+// --- ROLLING AVERAGES ---
+
+// 3-Month Rolling MRR
+Rolling 3M MRR = 
+CALCULATE(
+    [MRR],
+    DATESINPERIOD(
+        dim_date[date],
+        MAX(dim_date[date]),
+        -3,
+        MONTH
+    )
+) / 3
+
+// 12-Month Rolling ARR
+Rolling 12M ARR = 
+CALCULATE(
+    [ARR],
+    DATESINPERIOD(
+        dim_date[date],
+        MAX(dim_date[date]),
+        -12,
+        MONTH
+    )
+) / 12
+
+// --- RLS (Row Level Security) ---
+
+// Dynamic RLS for Regional Managers
+RLS_Region = 
+VAR UserRegion = 
+    LOOKUPVALUE(
+        dim_users[region],
+        dim_users[email],
+        USERNAME()
+    )
+RETURN 
+    dim_customers[region] = UserRegion 
+    || ISBLANK(UserRegion)
+
+// Dynamic RLS for Account Managers
+RLS_Account = 
+VAR UserEmail = USERNAME()
+VAR AssignedCustomers = 
+    CALCULATETABLE(
+        VALUES(dim_users[customer_id]),
+        dim_users[email] = UserEmail
+    )
+RETURN 
+    dim_customers[customer_id] IN AssignedCustomers
+    || ISBLANK(UserEmail)
